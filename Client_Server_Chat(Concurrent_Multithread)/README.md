@@ -1,4 +1,4 @@
-1. CLIENT Side:
+## 1. CLIENT Side:
   a)the client main should create two threads for read and write respectively, after connecting to the server
   b)the client write thread takes input from keyboard. This input is sent to the server. This write should be performed inside a while loop, on a boolean variable writeFlag. As long as writeFlag is true, the write to the server loop should continue.
   c)if the keyboard input is "bye", after sending this to the server, writeFlag will be set to false. This will cause the writeThread to come out of the write loop and terminate.
@@ -6,7 +6,7 @@
   e)the client main thread will wait for the read and write threads to terminate (via thread joins). Then it will close the input and output streams and the socket.
 
 
-2. SERVER Side:
+## 2. SERVER Side:
   a)the concurrent server main thread should create two threads for read and write respectively, after accepting each client. I.e., each time a new client connects to the server, i.e., the server accepts the connection, two threads per client are created. There may be multiple clients connected to a given server at the same time, hence the name concurrent.
   b)the server write thread takes input from keyboard. This input is sent to the client. This should loop on a flag variable. This flag should be common among two threads for the same client, but will be different for different client handlers inside the server. You can optionally make the checking or setting of this flag (to be stated next) in a synchronised block. The server write threads should not initiate any client close operation (as of now).
   c)when the flag will be set to false, will cause the server writeThread for a particular client to write "bye" to the client, come out of the write loop and terminate. How the flag will be set to false is stated in the readThread description.
