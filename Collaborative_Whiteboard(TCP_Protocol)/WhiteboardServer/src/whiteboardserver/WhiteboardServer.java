@@ -1,89 +1,119 @@
-package whiteboardserver;
-
 import java.io.*;
 import java.net.*;
 import java.util.*;
 
 public class WhiteboardServer {
-    private static final int PORT = 5555;
+    private static final int PORT = 5000;
+    private static final List<String> history = new ArrayList<>();
     private static final List<Socket> clients = Collections.synchronizedList(new ArrayList<>());
-    private static final List<String> history = Collections.synchronizedList(new ArrayList<>());
 
-    public static void main(String[] args) {
-        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
-            System.out.println("Server started on port " + PORT);
+    public static void main(String[] args) throws IOException {
+        ServerSocket serverSocket = new ServerSocket(PORT);
+        System.out.println("Whiteboard Server running on port " + PORT);
 
-            while (true) {
-                Socket clientSocket = serverSocket.accept();
-                System.out.println("New client connected: " + clientSocket.getInetAddress());
-                clients.add(clientSocket);
-                new ClientHandler(clientSocket).start();
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
+        while (true) {
+            Socket clientSocket = serverSocket.accept();
+            System.out.println("New client connected: " + clientSocket);
+
+            clients.add(clientSocket);
+            new Thread(new ClientHandler(clientSocket)).start();
         }
     }
 
-    static class ClientHandler extends Thread {
-        private Socket socket;
+    private static class ClientHandler implements Runnable {
+        private final Socket socket;
 
         public ClientHandler(Socket socket) {
             this.socket = socket;
-        }
-
-        public void run() {
-            try (
-                BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-                PrintWriter out = new PrintWriter(socket.getOutputStream(), true)
-            ) {
-                String message;
-                while ((message = in.readLine()) != null) {
-                    if (message.equals("SYNC")) {
-                        // Send all previous canvas history
-                        synchronized (history) {
-                            for (String line : history) {
-                                out.println(line);
-                            }
-                        }
-                    } else if (message.equals("UNDO")) {
-                        // Broadcast the UNDO command but don't add it to history
-                        broadcast(message);
-                    } else if (message.equals("CLEAR")) {
-                        // Handle CLEAR - broadcast and clear history
-                        broadcast(message);
-                        synchronized (history) {
-                            history.clear();  // Clear the history on CLEAR command
-                        }
-                    } else {
-                        // Regular drawing operation
-                        broadcast(message);
-                        synchronized (history) {
-                            history.add(message);  // Add to history
-                        }
-                    }
-                }
-            } catch (IOException e) {
-                System.out.println("Client disconnected: " + socket.getInetAddress());
-            } finally {
-                clients.remove(socket);
-                try {
-                    socket.close();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
+            try {
+                // Set socket read timeout: disconnect after 30 sec of inactivity
+                socket.setSoTimeout(30000);
+            } catch (SocketException e) {
+                System.out.println("Failed to set timeout: " + e.getMessage());
             }
         }
 
-        private void broadcast(String message) {
-            synchronized (clients) {
-                for (Socket client : clients) {
-                    if (client != socket) {  // Don't send back to the sender
-                        try {
-                            PrintWriter out = new PrintWriter(client.getOutputStream(), true);
-                            out.println(message);
-                        } catch (IOException e) {
-                            e.printStackTrace();
+        @Override
+        public void run() {
+            try {
+                BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+
+                // Send full history on initial connection
+                synchronized (history) {
+                    for (String stroke : history) {
+                        out.println(stroke);
+                    }
+                }
+
+                String line;
+                while ((line = in.readLine()) != null) {
+                    System.out.println("Received: " + line);
+
+                    if (line.equals("SYNC")) {
+                        // Send history again if SYNC is requested
+                        synchronized (history) {
+                            for (String stroke : history) {
+                                out.println(stroke);
+                            }
                         }
+                    } else if (line.equals("CLEAR")) {
+                        synchronized (history) {
+                            history.clear();
+                        }
+                        broadcast("CLEAR", null);
+                    } else if (line.equals("UNDO")) {
+                        synchronized (history) {
+                            if (!history.isEmpty()) {
+                                history.remove(history.size() - 1);
+                            }
+                        }
+                        broadcast("UNDO", null);
+                    } else {
+                        // Normal stroke
+                        synchronized (history) {
+                            history.add(line);
+                            if (history.size() > 1000) {
+                                history.remove(0); // limit memory usage
+                            }
+                        }
+                        broadcast(line, socket); // send to all others
+                    }
+                }
+
+            } catch (SocketTimeoutException e) {
+                System.out.println("Client timed out: " + socket);
+            } catch (IOException e) {
+                System.out.println("Client error: " + e.getMessage());
+            } finally {
+                try {
+                    socket.close();
+                } catch (IOException e) {
+                    // Ignore
+                }
+                clients.remove(socket);
+                System.out.println("Client disconnected: " + socket);
+            }
+        }
+    }
+
+    private static void broadcast(String message, Socket excludeSocket) {
+        synchronized (clients) {
+            Iterator<Socket> iterator = clients.iterator();
+            while (iterator.hasNext()) {
+                Socket client = iterator.next();
+                if (client != excludeSocket) {
+                    try {
+                        PrintWriter out = new PrintWriter(client.getOutputStream(), true);
+                        out.println(message);
+                    } catch (IOException e) {
+                        System.out.println("Dead client detected. Removing: " + client);
+                        try {
+                            client.close();
+                        } catch (IOException ex) {
+                            // Ignore
+                        }
+                        iterator.remove();
                     }
                 }
             }
