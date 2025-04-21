@@ -9,12 +9,13 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class WhiteboardClient extends JFrame {
-    private static final String SERVER_IP = "127.0.0.1";
+    private static final String SERVER_IP = "127.0.0.1";  // Change to LAN server IP if needed
     private static final int PORT = 5555;
     private Socket socket;
     private PrintWriter out;
     private DrawingPanel drawingPanel;
-    private Color selectedColor = Color.BLACK;
+    private Color selectedColor = Color.BLACK;  // Default color
+    private boolean performingLocalUndo = false; // Flag to prevent duplicate undos
 
     public WhiteboardClient() {
         setTitle("Collaborative Whiteboard with Undo");
@@ -51,13 +52,13 @@ public class WhiteboardClient extends JFrame {
 
         colorButton.addActionListener(e -> chooseColor());
 
-        // FOCUS HERE: Simplified undo button handler
+        // Fixed undo button handling
         undoButton.addActionListener(e -> {
-            System.out.println("Undo button clicked. Strokes before: " + drawingPanel.strokes.size());
-            drawingPanel.undoLastStroke();
-            System.out.println("Strokes after: " + drawingPanel.strokes.size());
             if (out != null) {
+                // Just send the UNDO command to the server
+                // The actual undo will happen when we receive it back
                 out.println("UNDO");
+                System.out.println("Sent UNDO command to server");
             }
         });
 
@@ -79,40 +80,50 @@ public class WhiteboardClient extends JFrame {
         new Thread(this::listenForServerData).start();
     }
 
+    // Connect to the server
     private void connectToServer() {
         try {
             socket = new Socket(SERVER_IP, PORT);
             out = new PrintWriter(socket.getOutputStream(), true);
+            System.out.println("Connected to server at " + SERVER_IP + ":" + PORT);
         } catch (IOException e) {
             JOptionPane.showMessageDialog(this, "Unable to connect to server", "Error", JOptionPane.ERROR_MESSAGE);
             System.exit(1);
         }
     }
 
+    // Listen for server data
     private void listenForServerData() {
         try (BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
             String message;
             while ((message = in.readLine()) != null) {
-                if (message.equals("UNDO")) {
-                    SwingUtilities.invokeLater(() -> drawingPanel.undoLastStroke());
-                } else if (message.equals("CLEAR")) {
-                    SwingUtilities.invokeLater(() -> drawingPanel.clear());
-                } else {
-                    final String finalMessage = message;
-                    SwingUtilities.invokeLater(() -> drawingPanel.processStrokeFromServer(finalMessage));
-                }
+                final String receivedMessage = message;
+                SwingUtilities.invokeLater(() -> {
+                    if (receivedMessage.equals("UNDO")) {
+                        System.out.println("Received UNDO command from server");
+                        drawingPanel.undoLastStroke();
+                    } else if (receivedMessage.equals("CLEAR")) {
+                        System.out.println("Received CLEAR command from server");
+                        drawingPanel.clear();
+                    } else {
+                        drawingPanel.processStrokeFromServer(receivedMessage);
+                    }
+                });
             }
         } catch (IOException e) {
             System.out.println("Disconnected from server");
         }
     }
 
+    // Request sync for previous canvas data
     private void requestSync() {
         if (out != null) {
             out.println("SYNC");
+            System.out.println("Sent SYNC request to server");
         }
     }
 
+    // Choose color using JColorChooser
     private void chooseColor() {
         Color newColor = JColorChooser.showDialog(this, "Choose Drawing Color", selectedColor);
         if (newColor != null) {
@@ -120,7 +131,7 @@ public class WhiteboardClient extends JFrame {
         }
     }
 
-    // FOCUS HERE: Simplified DrawingPanel focusing on local undo
+    // DrawingPanel class to handle canvas operations
     private class DrawingPanel extends JPanel {
         private int prevX, prevY;
         private String mode = "DRAW";
@@ -128,34 +139,11 @@ public class WhiteboardClient extends JFrame {
         private Image canvas;
         private Graphics2D g2;
 
-        // Store stroke information for undo
+        // List of strokes to handle undo properly
         private final List<String> strokes = new ArrayList<>();
         
-        // Store the last stroke as segments for continuous drawing
-        private final List<StrokeSegment> currentStrokeSegments = new ArrayList<>();
-        
-        private class StrokeSegment {
-            int x1, y1, x2, y2;
-            String mode;
-            int weight;
-            Color color;
-            
-            StrokeSegment(int x1, int y1, int x2, int y2, String mode, int weight, Color color) {
-                this.x1 = x1;
-                this.y1 = y1;
-                this.x2 = x2;
-                this.y2 = y2;
-                this.mode = mode;
-                this.weight = weight;
-                this.color = color;
-            }
-            
-            String serialize() {
-                return mode + "," + weight + "," + 
-                       color.getRed() + "," + color.getGreen() + "," + color.getBlue() + "," +
-                       x1 + "," + y1 + "," + x2 + "," + y2;
-            }
-        }
+        // Store the last stroke segments for continuous drawing
+        private final List<String> currentStrokeSegments = new ArrayList<>();
 
         public DrawingPanel() {
             setBackground(Color.WHITE);
@@ -163,24 +151,24 @@ public class WhiteboardClient extends JFrame {
             addMouseMotionListener(new MouseMotionAdapter() {
                 public void mouseDragged(MouseEvent e) {
                     int x = e.getX(), y = e.getY();
-                    
-                    // Create a new stroke segment
-                    StrokeSegment segment = new StrokeSegment(
-                        prevX, prevY, x, y, mode, strokeWeight, selectedColor
-                    );
-                    
-                    // Draw the segment
-                    drawLine(segment.x1, segment.y1, segment.x2, segment.y2, 
-                             segment.mode, segment.weight, segment.color);
-                    
-                    // Add to current stroke segments
-                    currentStrokeSegments.add(segment);
-                    
-                    // Send to server
+
                     if (out != null) {
-                        out.println(segment.serialize());
+                        String colorStr = selectedColor.getRed() + "," +
+                                selectedColor.getGreen() + "," +
+                                selectedColor.getBlue();
+
+                        String message = mode + "," + strokeWeight + "," + colorStr + "," +
+                                prevX + "," + prevY + "," + x + "," + y;
+
+                        out.println(message);
+                        
+                        // Add to current stroke segments
+                        currentStrokeSegments.add(message);
+                        
+                        // Draw locally
+                        drawStrokeFromString(message);
                     }
-                    
+
                     prevX = x;
                     prevY = y;
                 }
@@ -190,19 +178,15 @@ public class WhiteboardClient extends JFrame {
                 public void mousePressed(MouseEvent e) {
                     prevX = e.getX();
                     prevY = e.getY();
-                    // Clear the current stroke segments for a new stroke
                     currentStrokeSegments.clear();
                 }
                 
                 public void mouseReleased(MouseEvent e) {
-                    // When mouse is released, add all segments as one stroke
+                    // When mouse is released, combine all segments into one stroke
                     if (!currentStrokeSegments.isEmpty()) {
-                        StringBuilder strokeData = new StringBuilder("MULTISEGMENT");
-                        for (StrokeSegment segment : currentStrokeSegments) {
-                            strokeData.append("|").append(segment.serialize());
-                        }
-                        strokes.add(strokeData.toString());
-                        System.out.println("Added stroke. Total strokes: " + strokes.size());
+                        // Add the complete stroke to history
+                        strokes.add(String.join("|", currentStrokeSegments));
+                        System.out.println("Added complete stroke. Total strokes: " + strokes.size());
                     }
                 }
             });
@@ -220,26 +204,26 @@ public class WhiteboardClient extends JFrame {
             g.drawImage(canvas, 0, 0, null);
         }
 
-        // Process stroke data from the server
+        // Process stroke from server
         public void processStrokeFromServer(String message) {
-            if (message.startsWith("MULTISEGMENT")) {
-                // Handle multi-segment stroke
+            if (message.contains("|")) {
+                // This is a multi-segment stroke
                 strokes.add(message);
                 String[] segments = message.split("\\|");
-                for (int i = 1; i < segments.length; i++) {
-                    drawStrokeFromString(segments[i]);
+                for (String segment : segments) {
+                    drawStrokeFromString(segment);
                 }
             } else {
-                // Handle single segment stroke
+                // Single segment stroke
                 strokes.add(message);
                 drawStrokeFromString(message);
             }
             repaint();
         }
 
-        // FOCUS HERE: Fixed clear method
+        // Clear the canvas and stroke history
         public void clear() {
-            if (g2 != null) {
+            if (canvas != null) {
                 g2.setColor(Color.WHITE);
                 g2.fillRect(0, 0, getWidth(), getHeight());
                 strokes.clear();
@@ -249,18 +233,18 @@ public class WhiteboardClient extends JFrame {
             }
         }
 
-        // FOCUS HERE: Fixed undo method
+        // Undo the last stroke
         public void undoLastStroke() {
             if (!strokes.isEmpty()) {
                 strokes.remove(strokes.size() - 1);
+                System.out.println("Stroke removed. Remaining strokes: " + strokes.size());
                 redrawAllStrokes();
-                System.out.println("Undo successful. Remaining strokes: " + strokes.size());
             } else {
-                System.out.println("Nothing to undo");
+                System.out.println("Nothing to undo - stroke list is empty");
             }
         }
 
-        // FOCUS HERE: Completely redraw everything after an undo
+        // Redraw the canvas with all strokes
         private void redrawAllStrokes() {
             if (g2 == null) return;
             
@@ -270,16 +254,53 @@ public class WhiteboardClient extends JFrame {
             
             // Redraw all remaining strokes
             for (String stroke : strokes) {
-                if (stroke.startsWith("MULTISEGMENT")) {
+                if (stroke.contains("|")) {
+                    // Multi-segment stroke
                     String[] segments = stroke.split("\\|");
-                    for (int i = 1; i < segments.length; i++) {
-                        drawStrokeFromString(segments[i]);
+                    for (String segment : segments) {
+                        drawStrokeFromString(segment);
                     }
                 } else {
+                    // Single segment stroke
                     drawStrokeFromString(stroke);
                 }
             }
             repaint();
+        }
+
+        // Draw from a stored string format
+        private void drawStrokeFromString(String message) {
+            String[] parts = message.split(",");
+            
+            if (parts.length < 7) {
+                System.out.println("Invalid stroke format: " + message);
+                return;
+            }
+
+            try {
+                String mode = parts[0];
+                int weight = Integer.parseInt(parts[1]);
+                
+                // Extract color
+                Color color;
+                int colorIndex = 2;
+                int r = Integer.parseInt(parts[colorIndex++]);
+                int g = Integer.parseInt(parts[colorIndex++]);
+                int b = Integer.parseInt(parts[colorIndex++]);
+                color = new Color(r, g, b);
+                
+                // Extract coordinates
+                int x1 = Integer.parseInt(parts[colorIndex++]);
+                int y1 = Integer.parseInt(parts[colorIndex++]);
+                int x2 = Integer.parseInt(parts[colorIndex++]);
+                int y2 = Integer.parseInt(parts[colorIndex]);
+                
+                // Draw the line
+                drawLine(x1, y1, x2, y2, mode, weight, color);
+            } catch (Exception e) {
+                System.err.println("Error parsing stroke: " + message);
+                e.printStackTrace();
+            }
         }
 
         // Draw a line on the canvas
@@ -296,36 +317,6 @@ public class WhiteboardClient extends JFrame {
 
             g2.drawLine(x1, y1, x2, y2);
             repaint();
-        }
-
-        // Draw from a stored string format
-        private void drawStrokeFromString(String message) {
-            String[] parts = message.split(",");
-            
-            if (parts.length < 9) {
-                System.out.println("Invalid stroke format: " + message);
-                return;
-            }
-
-            try {
-                String mode = parts[0];
-                int weight = Integer.parseInt(parts[1]);
-                Color color = new Color(
-                    Integer.parseInt(parts[2]),
-                    Integer.parseInt(parts[3]),
-                    Integer.parseInt(parts[4])
-                );
-                
-                int x1 = Integer.parseInt(parts[5]);
-                int y1 = Integer.parseInt(parts[6]);
-                int x2 = Integer.parseInt(parts[7]);
-                int y2 = Integer.parseInt(parts[8]);
-                
-                drawLine(x1, y1, x2, y2, mode, weight, color);
-            } catch (Exception e) {
-                System.err.println("Error parsing stroke: " + message);
-                e.printStackTrace();
-            }
         }
 
         public void setMode(String mode) {
