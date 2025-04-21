@@ -1,119 +1,131 @@
+package whiteboardserver;
+
 import java.io.*;
 import java.net.*;
 import java.util.*;
 
 public class WhiteboardServer {
-    private static final int PORT = 5000;
-    private static final List<String> history = new ArrayList<>();
+    private static final int PORT = 5555;
     private static final List<Socket> clients = Collections.synchronizedList(new ArrayList<>());
+    private static final List<String> history = Collections.synchronizedList(new ArrayList<>());
 
-    public static void main(String[] args) throws IOException {
-        ServerSocket serverSocket = new ServerSocket(PORT);
-        System.out.println("Whiteboard Server running on port " + PORT);
+    public static void main(String[] args) {
+        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
+            System.out.println("Server started on port " + PORT);
 
-        while (true) {
-            Socket clientSocket = serverSocket.accept();
-            System.out.println("New client connected: " + clientSocket);
-
-            clients.add(clientSocket);
-            new Thread(new ClientHandler(clientSocket)).start();
+            while (true) {
+                Socket clientSocket = serverSocket.accept();
+                System.out.println("New client connected: " + clientSocket.getInetAddress());
+                clients.add(clientSocket);
+                new ClientHandler(clientSocket).start();
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
         }
     }
 
-    private static class ClientHandler implements Runnable {
-        private final Socket socket;
+    static class ClientHandler extends Thread {
+        private Socket socket;
 
         public ClientHandler(Socket socket) {
             this.socket = socket;
-            try {
-                // Set socket read timeout: disconnect after 30 sec of inactivity
-                socket.setSoTimeout(30000);
-            } catch (SocketException e) {
-                System.out.println("Failed to set timeout: " + e.getMessage());
-            }
         }
 
-        @Override
         public void run() {
-            try {
+            try (
                 BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-                PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
-
-                // Send full history on initial connection
-                synchronized (history) {
-                    for (String stroke : history) {
-                        out.println(stroke);
-                    }
-                }
-
-                String line;
-                while ((line = in.readLine()) != null) {
-                    System.out.println("Received: " + line);
-
-                    if (line.equals("SYNC")) {
-                        // Send history again if SYNC is requested
+                PrintWriter out = new PrintWriter(socket.getOutputStream(), true)
+            ) {
+                String message;
+                while ((message = in.readLine()) != null) {
+                    System.out.println("Received from client: " + message);
+                    
+                    if (message.equals("SYNC")) {
+                        // Send all previous canvas history
+                        System.out.println("Sending sync data. History size: " + history.size());
                         synchronized (history) {
-                            for (String stroke : history) {
-                                out.println(stroke);
+                            for (String line : history) {
+                                out.println(line);
                             }
                         }
-                    } else if (line.equals("CLEAR")) {
-                        synchronized (history) {
-                            history.clear();
-                        }
-                        broadcast("CLEAR", null);
-                    } else if (line.equals("UNDO")) {
+                    } else if (message.equals("UNDO")) {
+                        System.out.println("Processing UNDO command");
+                        
+                        // Remove the last stroke from server history first
                         synchronized (history) {
                             if (!history.isEmpty()) {
                                 history.remove(history.size() - 1);
+                                System.out.println("Removed last stroke from history. New size: " + history.size());
+                            } else {
+                                System.out.println("History is empty, nothing to undo");
                             }
                         }
-                        broadcast("UNDO", null);
-                    } else {
-                        // Normal stroke
+                        
+                        // Then broadcast the UNDO to ALL clients
+                        broadcastToAll(message);
+                    } else if (message.equals("CLEAR")) {
+                        System.out.println("Processing CLEAR command");
+                        // Clear history first
                         synchronized (history) {
-                            history.add(line);
-                            if (history.size() > 1000) {
-                                history.remove(0); // limit memory usage
-                            }
+                            history.clear();
+                            System.out.println("History cleared");
                         }
-                        broadcast(line, socket); // send to all others
+                        // Then broadcast
+                        broadcastToAll(message);
+                    } else {
+                        // Regular drawing operation - this is from stroke segments
+                        if (message.contains("|")) {
+                            // This is a combined stroke with multiple segments
+                            synchronized (history) {
+                                history.add(message);
+                            }
+                        } else {
+                            // Single stroke segment - we don't need to add this to history
+                            // as it will be part of a combined stroke later
+                        }
+                        
+                        // Broadcast to all except sender
+                        broadcast(message);
                     }
                 }
-
-            } catch (SocketTimeoutException e) {
-                System.out.println("Client timed out: " + socket);
             } catch (IOException e) {
-                System.out.println("Client error: " + e.getMessage());
+                System.out.println("Client disconnected: " + socket.getInetAddress());
             } finally {
+                clients.remove(socket);
                 try {
                     socket.close();
                 } catch (IOException e) {
-                    // Ignore
+                    e.printStackTrace();
                 }
-                clients.remove(socket);
-                System.out.println("Client disconnected: " + socket);
             }
         }
-    }
 
-    private static void broadcast(String message, Socket excludeSocket) {
-        synchronized (clients) {
-            Iterator<Socket> iterator = clients.iterator();
-            while (iterator.hasNext()) {
-                Socket client = iterator.next();
-                if (client != excludeSocket) {
+        // Method to broadcast to all clients EXCEPT the sender
+        private void broadcast(String message) {
+            synchronized (clients) {
+                for (Socket client : clients) {
+                    if (client != socket) {  // Skip the sender
+                        try {
+                            PrintWriter out = new PrintWriter(client.getOutputStream(), true);
+                            out.println(message);
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Method to broadcast to ALL clients INCLUDING the sender
+        private void broadcastToAll(String message) {
+            System.out.println("Broadcasting to all clients: " + message);
+            synchronized (clients) {
+                for (Socket client : clients) {
                     try {
                         PrintWriter out = new PrintWriter(client.getOutputStream(), true);
                         out.println(message);
                     } catch (IOException e) {
-                        System.out.println("Dead client detected. Removing: " + client);
-                        try {
-                            client.close();
-                        } catch (IOException ex) {
-                            // Ignore
-                        }
-                        iterator.remove();
+                        e.printStackTrace();
                     }
                 }
             }
